@@ -74,7 +74,7 @@ def get_data_loaders(data_dir: str, batch_size: int = 64, num_workers: int = 4) 
 
     return train_loader, val_loader
 
-def get_test_loader(data_dir: str, batch_size: int = 64) -> DataLoader:
+def get_test_loader(data_dir: str, batch_size: int = 64, num_workers: int = 4) -> DataLoader:
     test_transforms = transforms.Compose([
         transforms.Resize((64, 64)),
         transforms.ToTensor(),
@@ -87,6 +87,6 @@ def get_test_loader(data_dir: str, batch_size: int = 64) -> DataLoader:
         transform=test_transforms
     )
 
-    test_loader = DataLoader(test_dataset, batch_size = batch_size, shuffle = False, num_workers = 2)
+    test_loader = DataLoader(test_dataset, batch_size = batch_size, shuffle = False, num_workers = num_workers)
 
     return test_loader
