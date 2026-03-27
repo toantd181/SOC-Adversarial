@@ -470,7 +470,7 @@ def run_training(args: argparse.Namespace) -> Dict[str, List[float]]:
     # ReduceLROnPlateau halves LR when val_loss plateaus for 2 epochs,
     # complementing early stopping with a softer first response.
     scheduler  = ReduceLROnPlateau(
-        optimiser, mode="min", factor=0.5, patience=2, verbose=True
+        optimiser, mode="min", factor=0.5, patience=2
     )
     early_stop = EarlyStopping(patience=args.patience, min_delta=1e-4)
 
