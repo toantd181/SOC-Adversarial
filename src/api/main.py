@@ -96,7 +96,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ---- Model weights (Phase 3 – graceful skip in Phase 1) --------------
     try:
         # Deferred import: avoids hard dependency on torch during Phase 1
-        from src.models.cnn_classifier import CNNClassifier  # noqa: F401
+        from src.models.cnn_classifier import TrafficSignNet  # noqa: F401
         import torch
 
         weights_path = "weights/robust_cnn.pth"

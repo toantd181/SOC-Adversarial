@@ -43,7 +43,7 @@ from tqdm import tqdm
 # ---------------------------------------------------------------------------
 # Absolute imports from project root
 # ---------------------------------------------------------------------------
-from src.data.dataset import get_dataloaders          # returns train/val DataLoaders
+from src.data.dataset import get_data_loaders          # returns train/val DataLoaders
 from src.models.cnn_classifier import TrafficSignNet  # Victim Model architecture
 
 # ---------------------------------------------------------------------------
