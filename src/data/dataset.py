@@ -4,7 +4,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
 from sklearn.model_selection import train_test_split
 
 class GTSRBDataset(Dataset):
