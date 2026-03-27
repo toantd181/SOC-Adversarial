@@ -443,7 +443,7 @@ def run_training(args: argparse.Namespace) -> Dict[str, List[float]]:
 
     # ---- Data ------------------------------------------------------------
     logger.info("Loading data from '%s' …", args.data_dir)
-    train_loader, val_loader = get_dataloaders(
+    train_loader, val_loader = get_data_loaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
