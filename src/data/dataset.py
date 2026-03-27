@@ -32,7 +32,7 @@ class GTSRBDataset(Dataset):
 
         return image, y_label
     
-def get_data_loaders(data_dir: str, batch_size: int = 64) -> Tuple[DataLoader, DataLoader]:
+def get_data_loaders(data_dir: str, batch_size: int = 64, num_workers: int = 4) -> Tuple[DataLoader, DataLoader]:
     train_transforms = transforms.Compose([
         transforms.Resize((64, 64)),
         transforms.RandomRotation(10),
@@ -69,8 +69,8 @@ def get_data_loaders(data_dir: str, batch_size: int = 64) -> Tuple[DataLoader, D
         transform = train_transforms
     )
 
-    train_loader = DataLoader(train_dataset, batch_size = batch_size, shuffle = True, num_workers = 2)
-    val_loader = DataLoader(val_dataset, batch_size = batch_size, shuffle = False, num_workers = 2)
+    train_loader = DataLoader(train_dataset, batch_size = batch_size, shuffle = True, num_workers = num_workers)
+    val_loader = DataLoader(val_dataset, batch_size = batch_size, shuffle = False, num_workers = num_workers)
 
     return train_loader, val_loader
 
