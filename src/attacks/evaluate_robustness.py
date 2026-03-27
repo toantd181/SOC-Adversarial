@@ -27,10 +27,11 @@ two fundamentally different classes of adversarial attack:
 
 Pipeline
 --------
-1. Clean Accuracy      – baseline performance on unperturbed test set.
+1. Clean Accuracy       – baseline performance on unperturbed test set.
 2. FGSM Robust Accuracy – performance after fast single-step attack.
 3. C&W  Robust Accuracy – performance after strong optimisation attack.
-4. Side-by-side visualisation grid saved to logs/adversarial_samples.png.
+4. Adversarial image grid  → logs/adversarial_samples.png
+5. Accuracy drop chart     → logs/accuracy_drop.png
 
 Usage (Kaggle / Cloud GPU):
     python -m src.attacks.evaluate_robustness \
@@ -42,7 +43,6 @@ Usage (Kaggle / Cloud GPU):
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -50,6 +50,8 @@ import matplotlib
 matplotlib.use("Agg")           # headless – no display server on Kaggle / SSH
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+import matplotlib.patches as mpatches
+import matplotlib.patheffects as pe
 import numpy as np
 import torch
 import torch.nn as nn
@@ -68,7 +70,22 @@ from src.models.cnn_classifier import TrafficSignNet
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# GTSRB class names (43 classes).  Indices match the dataset label encoding.
+# SOC colour palette – shared across both visualisations for consistency
+# ---------------------------------------------------------------------------
+
+SOC_BG      = "#0f0f14"   # near-black canvas
+SOC_SURFACE = "#1a1a24"   # slightly lighter panel surface
+SOC_GRID    = "#2a2a3a"   # subtle grid / border lines
+SOC_TEXT    = "#e0e0e0"   # primary labels
+SOC_SUBTEXT = "#9e9e9e"   # secondary / footnote text
+SOC_GREEN   = "#4CAF50"   # clean / safe
+SOC_ORANGE  = "#FF9800"   # moderate threat (FGSM)
+SOC_RED     = "#F44336"   # critical threat (C&W)
+SOC_ACCENT  = "#69f0ae"   # survived annotation
+SOC_WARN    = "#ff5252"   # fooled annotation
+
+# ---------------------------------------------------------------------------
+# GTSRB class names (43 classes)
 # ---------------------------------------------------------------------------
 
 GTSRB_LABELS: Dict[int, str] = {
@@ -148,7 +165,7 @@ def parse_args() -> argparse.Namespace:
         "--cw_c",
         type=float,
         default=1.0,
-        help="C&W trade-off constant c (higher → stronger attack, larger perturbation).",
+        help="C&W trade-off constant c (higher → stronger attack / larger perturbation).",
     )
     parser.add_argument(
         "--cw_steps",
@@ -160,16 +177,15 @@ def parse_args() -> argparse.Namespace:
         "--vis_samples",
         type=int,
         default=8,
-        help="Number of sample images shown in the visualisation grid (≤ batch_size).",
+        help="Number of sample images in the visualisation grid (≤ batch_size).",
     )
     parser.add_argument(
         "--logs_dir",
         type=str,
         default="logs",
-        help="Directory where visualisation artefacts are saved.",
+        help="Directory where all visualisation artefacts are saved.",
     )
     args = parser.parse_args()
-
     args.vis_samples = min(args.vis_samples, args.batch_size)
     return args
 
@@ -178,20 +194,16 @@ def parse_args() -> argparse.Namespace:
 # Model loading
 # ---------------------------------------------------------------------------
 
-def load_model(weights_path: str, num_classes: int, device: torch.device) -> nn.Module:
+def load_model(
+    weights_path: str,
+    num_classes: int,
+    device: torch.device,
+) -> nn.Module:
     """
     Instantiate TrafficSignNet and load pre-trained weights safely.
 
-    Parameters
-    ----------
-    weights_path : Path to the ``.pth`` state-dict file.
-    num_classes  : Number of classification heads.
-    device       : Target device (cuda / cpu).
-
-    Returns
-    -------
-    nn.Module
-        Model in eval mode, moved to ``device``.
+    ``map_location`` prevents GPU→CPU device-mismatch errors when the
+    weights were saved on a different hardware configuration.
 
     Raises
     ------
@@ -206,7 +218,6 @@ def load_model(weights_path: str, num_classes: int, device: torch.device) -> nn.
         )
 
     model = TrafficSignNet(num_classes=num_classes)
-    # Safe weight loading: map_location prevents GPU→CPU mismatch errors
     state_dict = torch.load(str(path), map_location=device)
     model.load_state_dict(state_dict)
     model.to(device)
@@ -217,7 +228,7 @@ def load_model(weights_path: str, num_classes: int, device: torch.device) -> nn.
 
 
 # ---------------------------------------------------------------------------
-# Accuracy evaluation helpers
+# Evaluation helpers
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
@@ -225,18 +236,18 @@ def evaluate_clean(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
-) -> Tuple[float, List[torch.Tensor], List[torch.Tensor]]:
+) -> Tuple[float, torch.Tensor, torch.Tensor]:
     """
-    Evaluate clean (unperturbed) accuracy on the test loader.
+    Evaluate clean (unperturbed) accuracy and capture the first batch for
+    the visualisation grid.
 
     Returns
     -------
-    Tuple[float, List[Tensor], List[Tensor]]
-        (accuracy_percent, first_batch_images, first_batch_labels)
-        The first-batch tensors are retained for the visualisation grid.
+    Tuple[float, Tensor, Tensor]
+        (accuracy_percent, first_batch_images_cpu, first_batch_labels_cpu)
     """
-    correct = 0
-    total   = 0
+    correct: int = 0
+    total:   int = 0
     snapshot_images: Optional[torch.Tensor] = None
     snapshot_labels: Optional[torch.Tensor] = None
 
@@ -246,18 +257,16 @@ def evaluate_clean(
         images = images.to(device)
         labels = labels.to(device)
 
-        logits  = model(images)
-        preds   = logits.argmax(dim=1)
+        preds   = model(images).argmax(dim=1)
         correct += int((preds == labels).sum().item())
         total   += labels.size(0)
 
-        # Snapshot the first batch for visualisation
         if batch_idx == 0:
             snapshot_images = images.cpu()
             snapshot_labels = labels.cpu()
 
     accuracy = 100.0 * correct / total if total > 0 else 0.0
-    return accuracy, snapshot_images, snapshot_labels  # type: ignore[return-value]
+    return accuracy, snapshot_images, snapshot_labels   # type: ignore[return-value]
 
 
 def evaluate_adversarial(
@@ -267,36 +276,26 @@ def evaluate_adversarial(
     device: torch.device,
     phase_name: str,
     snapshot_images: torch.Tensor,
+    snapshot_labels: torch.Tensor,
 ) -> Tuple[float, torch.Tensor, torch.Tensor]:
     """
     Generate adversarial examples with ``attack`` and measure robust accuracy.
 
-    ``torchattacks`` calls ``model.forward`` internally and requires the model
-    to be in eval mode with gradients available (no ``torch.no_grad()`` wrapper
-    around the attack call itself – only around the clean forward pass after).
-
-    Parameters
-    ----------
-    model           : The victim model (eval mode).
-    loader          : Test DataLoader.
-    attack          : Instantiated ``torchattacks.Attack`` object.
-    device          : Target device.
-    phase_name      : Display label for the tqdm bar.
-    snapshot_images : The same first-batch images used in the clean snapshot,
-                      so we can show clean vs adversarial pairs for the exact
-                      same inputs in the visualisation grid.
+    torchattacks requires the autograd graph to be live during the attack
+    call itself; ``torch.no_grad()`` is applied only around the subsequent
+    clean forward pass used for accuracy measurement.
 
     Returns
     -------
     Tuple[float, Tensor, Tensor]
         (robust_accuracy_percent,
-         adversarial_snapshot_images,
-         predicted_labels_for_snapshot)
+         adversarial_snapshot_images_cpu,
+         model_predictions_on_snapshot_cpu)
     """
-    correct = 0
-    total   = 0
-    adv_snapshot: Optional[torch.Tensor]  = None
-    adv_preds:    Optional[torch.Tensor]  = None
+    correct: int = 0
+    total:   int = 0
+    adv_snapshot: Optional[torch.Tensor] = None
+    adv_preds:    Optional[torch.Tensor] = None
 
     for batch_idx, (images, labels) in enumerate(
         tqdm(loader, desc=f"[{phase_name}] Attacking", unit="batch", dynamic_ncols=True)
@@ -304,171 +303,292 @@ def evaluate_adversarial(
         images = images.to(device)
         labels = labels.to(device)
 
-        # Generate adversarial examples – torchattacks handles grad context
+        # Attack call – autograd must be active here
         adv_images: torch.Tensor = attack(images, labels)
 
-        # Evaluate model on adversarial examples (no grad needed here)
         with torch.no_grad():
-            logits = model(adv_images)
-            preds  = logits.argmax(dim=1)
+            preds   = model(adv_images).argmax(dim=1)
+            correct += int((preds == labels).sum().item())
+            total   += labels.size(0)
 
-        correct += int((preds == labels).sum().item())
-        total   += labels.size(0)
-
-        # Snapshot: perturb the SAME first-batch inputs used for clean snapshot
+        # Perturb the fixed snapshot batch for the visualisation grid
         if batch_idx == 0:
-            adv_first = attack(snapshot_images.to(device), labels[: snapshot_images.size(0)])
+            adv_first = attack(
+                snapshot_images.to(device),
+                snapshot_labels.to(device),
+            )
             with torch.no_grad():
                 snap_preds = model(adv_first).argmax(dim=1)
             adv_snapshot = adv_first.cpu()
             adv_preds    = snap_preds.cpu()
 
     robust_accuracy = 100.0 * correct / total if total > 0 else 0.0
-    return robust_accuracy, adv_snapshot, adv_preds  # type: ignore[return-value]
+    return robust_accuracy, adv_snapshot, adv_preds   # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
-# Visualisation
+# Visualisation 1 – Adversarial image grid
 # ---------------------------------------------------------------------------
 
 def _tensor_to_display(tensor: torch.Tensor) -> np.ndarray:
     """
-    Convert a normalised CHW image tensor to an HWC uint8 numpy array
-    suitable for ``imshow``.
-
-    Handles both standard [0, 1] and arbitrary normalised ranges by clipping
-    after converting to [0, 1] via min-max scaling per image.
+    Convert a normalised CHW tensor to a displayable HWC uint8 numpy array.
+    Per-image min-max scaling handles any normalisation scheme without
+    requiring knowledge of the original mean / std.
     """
     img = tensor.detach().float()
-    # Min-max normalise to [0, 1] so display is not affected by normalisation
-    img_min = img.min()
-    img_max = img.max()
-    if img_max > img_min:
-        img = (img - img_min) / (img_max - img_min)
-    else:
-        img = img.clamp(0.0, 1.0)
-
-    img_np = img.permute(1, 2, 0).numpy()   # CHW → HWC
-    img_np = np.clip(img_np, 0.0, 1.0)
-    return (img_np * 255).astype(np.uint8)
+    lo, hi = img.min(), img.max()
+    img = (img - lo) / (hi - lo + 1e-8)
+    return (np.clip(img.permute(1, 2, 0).numpy(), 0.0, 1.0) * 255).astype(np.uint8)
 
 
 def save_adversarial_grid(
-    clean_images:    torch.Tensor,
-    clean_labels:    torch.Tensor,
-    fgsm_images:     torch.Tensor,
-    fgsm_preds:      torch.Tensor,
-    cw_images:       torch.Tensor,
-    cw_preds:        torch.Tensor,
-    clean_preds:     torch.Tensor,
-    n_samples:       int,
-    num_classes:     int,
-    save_path:       Path,
+    clean_images: torch.Tensor,
+    clean_labels: torch.Tensor,
+    clean_preds:  torch.Tensor,
+    fgsm_images:  torch.Tensor,
+    fgsm_preds:   torch.Tensor,
+    cw_images:    torch.Tensor,
+    cw_preds:     torch.Tensor,
+    n_samples:    int,
+    num_classes:  int,
+    save_path:    Path,
 ) -> None:
     """
-    Render a three-row comparison grid and save to ``save_path``.
+    Render a three-row (Clean / FGSM / C&W) side-by-side comparison grid.
 
-    Row 1 – Clean images  with the model's correct prediction.
-    Row 2 – FGSM examples with the model's (mis)prediction.
-    Row 3 – C&W  examples with the model's (mis)prediction.
-
-    A red title indicates a misclassification; green indicates the model
-    survived the attack for that sample.
-
-    Parameters
-    ----------
-    clean_images  : (N, C, H, W) clean image batch.
-    clean_labels  : (N,) ground-truth class indices.
-    fgsm_images   : (N, C, H, W) FGSM adversarial images.
-    fgsm_preds    : (N,) model predictions on FGSM images.
-    cw_images     : (N, C, H, W) C&W adversarial images.
-    cw_preds      : (N,) model predictions on C&W images.
-    clean_preds   : (N,) model predictions on clean images.
-    n_samples     : Number of columns (image samples) to display.
-    num_classes   : Total classes (for label lookup).
-    save_path     : Output file path.
+    Title colour convention:
+        Green  (SOC_ACCENT) → model prediction correct (survived attack).
+        Red    (SOC_WARN)   → model was fooled (misclassified).
     """
     n = min(n_samples, clean_images.size(0))
-    rows = 3   # Clean / FGSM / C&W
-    row_labels = ["Clean", "FGSM\n(ε=8/255)", "C&W\n(L2, 50 steps)"]
 
-    fig = plt.figure(figsize=(n * 2.4, rows * 3.0))
-    fig.patch.set_facecolor("#0f0f14")           # dark SOC-terminal aesthetic
+    fig = plt.figure(figsize=(n * 2.4, 3 * 3.0))
+    fig.patch.set_facecolor(SOC_BG)
 
     gs = gridspec.GridSpec(
-        rows, n,
-        figure=fig,
-        hspace=0.55,
-        wspace=0.08,
-        left=0.07, right=0.97,
-        top=0.88,  bottom=0.04,
+        3, n, figure=fig,
+        hspace=0.55, wspace=0.08,
+        left=0.07, right=0.97, top=0.88, bottom=0.04,
     )
 
-    # Row-label annotation on the left margin
+    row_labels = ["Clean", "FGSM\n(ε=8/255)", "C&W\n(L2, 50 steps)"]
     for row_idx, row_label in enumerate(row_labels):
         fig.text(
-            0.01,
-            1.0 - (row_idx + 0.5) / rows,
-            row_label,
+            0.01, 1.0 - (row_idx + 0.5) / 3, row_label,
             va="center", ha="left",
-            fontsize=9, fontweight="bold",
-            color="#e0e0e0",
-            rotation=90,
+            fontsize=9, fontweight="bold", color=SOC_TEXT, rotation=90,
         )
 
-    rows_data = [
-        (clean_images,  clean_preds,  clean_labels,  True),   # row 0: clean
-        (fgsm_images,   fgsm_preds,   clean_labels,  False),  # row 1: FGSM
-        (cw_images,     cw_preds,     clean_labels,  False),  # row 2: C&W
+    rows_data: List[Tuple[torch.Tensor, torch.Tensor, bool]] = [
+        (clean_images, clean_preds, True),
+        (fgsm_images,  fgsm_preds,  False),
+        (cw_images,    cw_preds,    False),
     ]
 
-    for row_idx, (images, preds, gt_labels, is_clean_row) in enumerate(rows_data):
+    for row_idx, (images, preds, is_clean_row) in enumerate(rows_data):
         for col_idx in range(n):
             ax = fig.add_subplot(gs[row_idx, col_idx])
-            ax.set_facecolor("#0f0f14")
-
-            # Image
-            img_np = _tensor_to_display(images[col_idx])
-            ax.imshow(img_np, interpolation="nearest")
+            ax.set_facecolor(SOC_BG)
+            ax.imshow(_tensor_to_display(images[col_idx]), interpolation="nearest")
             ax.axis("off")
 
             pred_idx = int(preds[col_idx].item())
-            gt_idx   = int(gt_labels[col_idx].item())
-            pred_str = label_name(pred_idx, num_classes)
-            gt_str   = label_name(gt_idx,   num_classes)
+            gt_idx   = int(clean_labels[col_idx].item())
             correct  = pred_idx == gt_idx
 
             if is_clean_row:
-                # Clean row: show ground-truth + prediction
-                title       = f"GT: {gt_str}\n→ {pred_str}"
-                title_color = "#69f0ae" if correct else "#ff5252"
+                title = f"GT: {label_name(gt_idx, num_classes)}\n→ {label_name(pred_idx, num_classes)}"
             else:
-                # Attack rows: show adversarial prediction vs ground truth
-                title       = f"→ {pred_str}"
-                title_color = "#69f0ae" if correct else "#ff5252"
+                title = f"→ {label_name(pred_idx, num_classes)}"
 
             ax.set_title(
                 title,
                 fontsize=6.5,
-                color=title_color,
+                color=SOC_ACCENT if correct else SOC_WARN,
                 pad=3,
                 fontweight="bold",
             )
 
-    # Main title
     fig.suptitle(
         "AI-SOC Red Team — Adversarial Attack Visualisation\n"
-        "Green title = model survived  |  Red title = model fooled",
-        fontsize=11,
-        fontweight="bold",
-        color="#ffffff",
-        y=0.97,
+        "Green = model survived  |  Red = model fooled",
+        fontsize=11, fontweight="bold", color=SOC_TEXT, y=0.97,
     )
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(str(save_path), dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.savefig(str(save_path), dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
     plt.close(fig)
     logger.info("Adversarial sample grid saved → %s", save_path)
+
+
+# ---------------------------------------------------------------------------
+# Visualisation 2 – Accuracy drop bar chart  (NEW)
+# ---------------------------------------------------------------------------
+
+def save_accuracy_chart(
+    clean_acc: float,
+    fgsm_acc:  float,
+    cw_acc:    float,
+    save_path: Path,
+) -> None:
+    """
+    Render a SOC-styled bar chart comparing clean vs adversarial accuracies.
+
+    Each bar is annotated with:
+      • Its exact accuracy value at the bar top (e.g. ``98.95%``).
+      • An absolute drop badge centred inside the bar for attacked
+        variants (e.g. ``↓ 39.79%``), drawn as a rounded rectangle with
+        a coloured border so it is immediately legible against the bar fill.
+
+    Styling decisions
+    -----------------
+    * Dark ``SOC_BG`` / ``SOC_SURFACE`` palette matches the image grid.
+    * Green / Orange / Red bars signal severity at a glance.
+    * A subtle wider semi-transparent bar behind each main bar creates a
+      soft glow without requiring external rendering dependencies.
+    * Y-axis runs 0 → 110 to guarantee space above the tallest bar for
+      the accuracy annotation without clipping.
+
+    Parameters
+    ----------
+    clean_acc : Clean test-set accuracy (%).
+    fgsm_acc  : Robust accuracy after FGSM attack (%).
+    cw_acc    : Robust accuracy after C&W attack (%).
+    save_path : Destination PNG path (parent dirs created if absent).
+    """
+    labels:     List[str]   = ["Clean\n(No Attack)", "FGSM\n(ε = 8/255)", "C&W\n(L2, 50 steps)"]
+    accuracies: List[float] = [clean_acc, fgsm_acc, cw_acc]
+    colours:    List[str]   = [SOC_GREEN, SOC_ORANGE, SOC_RED]
+    drops:      List[float] = [0.0, clean_acc - fgsm_acc, clean_acc - cw_acc]
+
+    fig, ax = plt.subplots(figsize=(9, 6))
+    fig.patch.set_facecolor(SOC_BG)
+    ax.set_facecolor(SOC_SURFACE)
+
+    # Horizontal grid drawn first so bars render on top
+    ax.yaxis.grid(True, color=SOC_GRID, linewidth=0.8, linestyle="--", zorder=0)
+    ax.set_axisbelow(True)
+
+    x_pos      = np.arange(len(labels))
+    bar_width  = 0.45
+
+    # Primary bars
+    bars = ax.bar(
+        x_pos, accuracies,
+        width=bar_width,
+        color=colours,
+        edgecolor=SOC_BG,
+        linewidth=1.2,
+        zorder=3,
+    )
+
+    # Soft glow: wider low-alpha bar behind each primary bar
+    for pos, acc, col in zip(x_pos, accuracies, colours):
+        ax.bar(pos, acc, width=bar_width + 0.10,
+               color=col, alpha=0.15, zorder=2)
+
+    # ---- Accuracy value annotations at bar tops --------------------------
+    for bar, acc in zip(bars, accuracies):
+        cx = bar.get_x() + bar.get_width() / 2
+        ax.text(
+            cx, bar.get_height() + 1.4,
+            f"{acc:.2f}%",
+            ha="center", va="bottom",
+            fontsize=13, fontweight="bold",
+            color=SOC_TEXT,
+            path_effects=[pe.withStroke(linewidth=2, foreground=SOC_BG)],
+            zorder=5,
+        )
+
+    # ---- Drop badge annotations centred inside attacked bars -------------
+    for bar, drop, col in zip(bars[1:], drops[1:], colours[1:]):
+        if drop <= 0.0:
+            continue
+
+        cx       = bar.get_x() + bar.get_width() / 2
+        badge_cy = bar.get_height() / 2   # vertical midpoint of the bar
+        badge_w  = 0.38
+        badge_h  = 5.5                    # in data units (percentage points)
+
+        # Rounded-rectangle badge background
+        badge = mpatches.FancyBboxPatch(
+            xy=(cx - badge_w / 2, badge_cy - badge_h / 2),
+            width=badge_w,
+            height=badge_h,
+            boxstyle="round,pad=0.02",
+            facecolor=SOC_BG,
+            edgecolor=col,
+            linewidth=1.4,
+            alpha=0.90,
+            zorder=6,
+            transform=ax.transData,
+        )
+        ax.add_patch(badge)
+
+        ax.text(
+            cx, badge_cy,
+            f"↓ {drop:.2f}%",
+            ha="center", va="center",
+            fontsize=10, fontweight="bold",
+            color=col,
+            zorder=7,
+        )
+
+    # ---- Axes -----------------------------------------------------------
+    ax.set_xlim(-0.6, len(labels) - 0.4)
+    ax.set_ylim(0, 110)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(labels, fontsize=11, color=SOC_TEXT)
+    ax.set_ylabel("Accuracy (%)", fontsize=11, color=SOC_TEXT, labelpad=10)
+    ax.set_xlabel("Attack Method", fontsize=11, color=SOC_TEXT, labelpad=10)
+    ax.tick_params(axis="y", colors=SOC_SUBTEXT, labelsize=9)
+    ax.tick_params(axis="x", colors=SOC_TEXT, length=0)
+
+    # Show only the bottom spine as a thin separator line
+    for name, spine in ax.spines.items():
+        if name == "bottom":
+            spine.set_color(SOC_GRID)
+            spine.set_linewidth(0.8)
+        else:
+            spine.set_visible(False)
+
+    # ---- Legend ----------------------------------------------------------
+    legend_handles = [
+        mpatches.Patch(facecolor=SOC_GREEN,  label="Clean  — no adversarial perturbation"),
+        mpatches.Patch(facecolor=SOC_ORANGE, label="FGSM   — fast single-step L∞ attack"),
+        mpatches.Patch(facecolor=SOC_RED,    label="C&W    — optimisation-based L2 attack"),
+    ]
+    ax.legend(
+        handles=legend_handles,
+        loc="upper right",
+        fontsize=9,
+        framealpha=0.25,
+        facecolor=SOC_BG,
+        edgecolor=SOC_GRID,
+        labelcolor=SOC_TEXT,
+    )
+
+    # ---- Titles ----------------------------------------------------------
+    ax.set_title(
+        "AI-SOC Red Team — Model Robustness Under Adversarial Attack",
+        fontsize=13, fontweight="bold",
+        color=SOC_TEXT, pad=16,
+    )
+    fig.text(
+        0.5, 0.01,
+        "TrafficSignNet (baseline_cnn.pth)  |  GTSRB Test Set",
+        ha="center", fontsize=8.5, color=SOC_SUBTEXT,
+    )
+
+    # ---- Save ------------------------------------------------------------
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout(rect=[0, 0.03, 1, 1])
+    plt.savefig(str(save_path), dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    logger.info("Accuracy drop chart saved → %s", save_path)
 
 
 # ---------------------------------------------------------------------------
@@ -478,11 +598,12 @@ def save_adversarial_grid(
 def run_evaluation(args: argparse.Namespace) -> None:
     """
     Full robustness evaluation pipeline:
-    clean accuracy → FGSM attack → C&W attack → visualisation → summary.
+    clean → FGSM → C&W → adversarial grid → accuracy chart → summary.
     """
-    logs_dir = Path(args.logs_dir)
+    logs_dir   = Path(args.logs_dir)
     logs_dir.mkdir(parents=True, exist_ok=True)
-    plot_path = logs_dir / "adversarial_samples.png"
+    grid_path  = logs_dir / "adversarial_samples.png"
+    chart_path = logs_dir / "accuracy_drop.png"
 
     # ---- Device ----------------------------------------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -515,87 +636,89 @@ def run_evaluation(args: argparse.Namespace) -> None:
     clean_acc, snap_images, snap_labels = evaluate_clean(model, test_loader, device)
     logger.info("Clean Accuracy: %.2f%%", clean_acc)
 
-    # Predict on the snapshot batch for the visualisation row labels
+    vis_images = snap_images[: args.vis_samples]
+    vis_labels = snap_labels[: args.vis_samples]
+
     with torch.no_grad():
-        snap_clean_logits = model(snap_images[: args.vis_samples].to(device))
-        snap_clean_preds  = snap_clean_logits.argmax(dim=1).cpu()
+        snap_clean_preds = model(vis_images.to(device)).argmax(dim=1).cpu()
 
     # ====================================================================
     # Step 2: FGSM Attack
-    # FGSM perturbs every pixel by ε × sign(∇_x L).  One backward pass,
-    # O(N) cost – fast but produces detectable structured noise patterns.
+    # Single-step L∞ attack – fast, coarse, high throughput.
     # ====================================================================
     logger.info("=" * 60)
     logger.info(
         "STEP 2 — FGSM Attack  (ε=%.4f ≈ %d/255)",
-        args.fgsm_eps,
-        round(args.fgsm_eps * 255),
+        args.fgsm_eps, round(args.fgsm_eps * 255),
     )
     logger.info("=" * 60)
 
     fgsm_attack = torchattacks.FGSM(model, eps=args.fgsm_eps)
-
     fgsm_acc, fgsm_snap, fgsm_snap_preds = evaluate_adversarial(
-        model       = model,
-        loader      = test_loader,
-        attack      = fgsm_attack,
-        device      = device,
-        phase_name  = "FGSM",
-        snapshot_images = snap_images[: args.vis_samples],
+        model=model, loader=test_loader, attack=fgsm_attack,
+        device=device, phase_name="FGSM",
+        snapshot_images=vis_images, snapshot_labels=vis_labels,
     )
     logger.info("FGSM Robust Accuracy: %.2f%%", fgsm_acc)
 
     # ====================================================================
-    # Step 3: Carlini & Wagner (C&W) L2 Attack
-    # C&W solves a constrained optimisation problem over many Adam steps,
-    # minimising ‖δ‖₂ while guaranteeing misclassification.  Far stronger
-    # and stealthier than FGSM; bypasses most gradient-masking defences.
+    # Step 3: C&W L2 Attack
+    # Iterative optimisation – stealthy, strong, bypasses many defences.
     # ====================================================================
     logger.info("=" * 60)
     logger.info(
         "STEP 3 — C&W L2 Attack  (c=%.1f, steps=%d)",
-        args.cw_c,
-        args.cw_steps,
+        args.cw_c, args.cw_steps,
     )
     logger.info("=" * 60)
 
     cw_attack = torchattacks.CW(model, c=args.cw_c, steps=args.cw_steps)
-
     cw_acc, cw_snap, cw_snap_preds = evaluate_adversarial(
-        model       = model,
-        loader      = test_loader,
-        attack      = cw_attack,
-        device      = device,
-        phase_name  = "C&W ",
-        snapshot_images = snap_images[: args.vis_samples],
+        model=model, loader=test_loader, attack=cw_attack,
+        device=device, phase_name="C&W ",
+        snapshot_images=vis_images, snapshot_labels=vis_labels,
     )
     logger.info("C&W Robust Accuracy: %.2f%%", cw_acc)
 
     # ====================================================================
-    # Step 4: Visualisation
+    # Step 4: Adversarial image grid
     # ====================================================================
     logger.info("=" * 60)
-    logger.info("STEP 4 — Generating adversarial visualisation grid …")
+    logger.info("STEP 4 — Generating adversarial image grid …")
     logger.info("=" * 60)
 
     save_adversarial_grid(
-        clean_images = snap_images[: args.vis_samples],
-        clean_labels = snap_labels[: args.vis_samples],
-        fgsm_images  = fgsm_snap[: args.vis_samples],
-        fgsm_preds   = fgsm_snap_preds[: args.vis_samples],
-        cw_images    = cw_snap[: args.vis_samples],
-        cw_preds     = cw_snap_preds[: args.vis_samples],
-        clean_preds  = snap_clean_preds[: args.vis_samples],
-        n_samples    = args.vis_samples,
-        num_classes  = args.num_classes,
-        save_path    = plot_path,
+        clean_images=vis_images,
+        clean_labels=vis_labels,
+        clean_preds=snap_clean_preds,
+        fgsm_images=fgsm_snap[: args.vis_samples],
+        fgsm_preds=fgsm_snap_preds[: args.vis_samples],
+        cw_images=cw_snap[: args.vis_samples],
+        cw_preds=cw_snap_preds[: args.vis_samples],
+        n_samples=args.vis_samples,
+        num_classes=args.num_classes,
+        save_path=grid_path,
     )
 
     # ====================================================================
-    # Summary report
+    # Step 5: Accuracy drop bar chart
     # ====================================================================
-    acc_drop_fgsm = clean_acc - fgsm_acc
-    acc_drop_cw   = clean_acc - cw_acc
+    logger.info("=" * 60)
+    logger.info("STEP 5 — Generating accuracy drop chart …")
+    logger.info("=" * 60)
+
+    save_accuracy_chart(
+        clean_acc=clean_acc,
+        fgsm_acc=fgsm_acc,
+        cw_acc=cw_acc,
+        save_path=chart_path,
+    )
+
+    # ====================================================================
+    # Terminal summary
+    # ====================================================================
+    drop_fgsm = clean_acc - fgsm_acc
+    drop_cw   = clean_acc - cw_acc
 
     summary = f"""
 ╔══════════════════════════════════════════════════════════════╗
@@ -607,13 +730,14 @@ def run_evaluation(args: argparse.Namespace) -> None:
 ╠══════════════════════════════════════════════════════════════╣
 ║  Clean Accuracy            :  {clean_acc:>6.2f}%                    ║
 ║                                                              ║
-║  FGSM Robust Accuracy      :  {fgsm_acc:>6.2f}%  (↓ {acc_drop_fgsm:>5.2f}%)           ║
+║  FGSM Robust Accuracy      :  {fgsm_acc:>6.2f}%  (↓ {drop_fgsm:>5.2f}%)           ║
 ║    ε = {args.fgsm_eps:.4f} ({round(args.fgsm_eps*255)}/255)                                     ║
 ║                                                              ║
-║  C&W  Robust Accuracy      :  {cw_acc:>6.2f}%  (↓ {acc_drop_cw:>5.2f}%)           ║
+║  C&W  Robust Accuracy      :  {cw_acc:>6.2f}%  (↓ {drop_cw:>5.2f}%)           ║
 ║    c = {args.cw_c:.1f},  steps = {args.cw_steps:<35d}║
 ╠══════════════════════════════════════════════════════════════╣
-║  Adversarial grid → {str(plot_path):<41s}║
+║  Adversarial grid  → {str(grid_path):<40s}║
+║  Accuracy chart    → {str(chart_path):<40s}║
 ╚══════════════════════════════════════════════════════════════╝"""
     logger.info(summary)
 
