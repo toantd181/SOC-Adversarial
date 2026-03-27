@@ -7,7 +7,7 @@ class ConvBlock(nn.Module):
         super(ConvBlock, self).__init__()
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size = 3, padding = 1, bias = False)
         self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLu(inplace = True)
+        self.relu = nn.ReLU(inplace = True)
         self.pool = nn.MaxPool2d(kernel_size = 2, stride = 2) if pool else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
