@@ -1,0 +1,8 @@
+2026-03-27T09:26:05 | [INFO]     | ai_soc.src.api.main | 88 | ============================================================
+2026-03-27T09:26:05 | [INFO]     | ai_soc.src.api.main | 89 | AI-SOC Adversarial Defense System – API Gateway starting
+2026-03-27T09:26:05 | [INFO]     | ai_soc.src.api.main | 90 | ============================================================
+2026-03-27T09:26:05 | [INFO]     | ai_soc.src.defense.sanitizer | 327 | InputSanitizer initialised | sanitize_threshold=0.45 | block_threshold=0.80 | method=gaussian_blur
+2026-03-27T09:26:05 | [INFO]     | ai_soc.src.api.main | 94 | InputSanitizer ready.
+2026-03-27T09:26:05 | [WARNING]  | ai_soc.src.api.main | 111 | Model weights not loaded (Phase 1 expected): No module named 'src.models'. Inference will return placeholder predictions.
+2026-03-27T09:26:05 | [INFO]     | ai_soc.src.api.main | 118 | Startup complete.  API is ready to accept requests.
+2026-03-27T09:26:20 | [INFO]     | ai_soc.src.api.main | 122 | AI-SOC API shutting down – flushing log handlers.
