@@ -88,7 +88,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.api.logger import get_logger
-from src.data.dataset import get_dataloaders
+from src.data.dataset import get_data_loaders
 from src.models.cnn_classifier import TrafficSignNet
 
 # ---------------------------------------------------------------------------
@@ -711,7 +711,7 @@ def run_adv_training(args: argparse.Namespace) -> Dict[str, List[float]]:
 
     # ---- Data ------------------------------------------------------------
     logger.info("Loading data from '%s' …", args.data_dir)
-    train_loader, val_loader = get_dataloaders(
+    train_loader, val_loader = get_data_loaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
